@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: telegram-video-compressor-link-bot
+    runtime: docker
+    plan: free
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: MAX_DOWNLOAD_MB
+        value: "500"
+      - key: JOB_TIMEOUT_SECONDS
+        value: "900"
