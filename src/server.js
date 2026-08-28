@@ -1,6 +1,5 @@
 const express = require("express");
 const { Telegraf, Markup } = require("telegraf");
-
 const fs = require("fs");
 const fsp = fs.promises;
 const path = require("path");
@@ -9,10 +8,7 @@ const crypto = require("crypto");
 const { spawn } = require("child_process");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-
-const PORT = Number(
-  process.env.PORT || 3000
-);
+const PORT = Number(process.env.PORT || 3000);
 
 const MAX_DOWNLOAD_MB = Number(
   process.env.MAX_DOWNLOAD_MB || 500
@@ -23,69 +19,45 @@ const JOB_TIMEOUT_SECONDS = Number(
 );
 
 if (!BOT_TOKEN) {
-  console.error("❌ BOT_TOKEN is missing");
+  console.error("❌ BOT_TOKEN غير موجود في Environment Variables");
   process.exit(1);
 }
 
-/* =========================
-   HTTP SERVER
-========================= */
-
 const app = express();
 
-app.get("/", (_, res) => {
-  res.send(
-    "✅ Telegram Video Compressor is running."
-  );
+app.get("/", (req, res) => {
+  res.send("✅ بوت ضغط الفيديو يعمل بنجاح");
 });
 
-app.get("/health", (_, res) => {
+app.get("/health", (req, res) => {
   res.json({
     ok: true,
     service: "telegram-video-compressor"
   });
 });
 
-app.listen(PORT, () => {
-  console.log(
-    "🌐 HTTP server on " + PORT
-  );
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🌐 HTTP server on ${PORT}`);
 });
 
-/* =========================
-   TELEGRAM BOT
-========================= */
-
-const bot = new Telegraf(
-  BOT_TOKEN
-);
-
-/* =========================
-   JOBS
-========================= */
+const bot = new Telegraf(BOT_TOKEN);
 
 const jobs = new Map();
 
-const root = path.join(
+const ROOT = path.join(
   os.tmpdir(),
-  "tg-video-compressor"
+  "telegram-video-compressor"
 );
 
-fs.mkdirSync(root, {
+fs.mkdirSync(ROOT, {
   recursive: true
 });
 
-/* =========================
-   HELPERS
-========================= */
-
-function mb(n) {
-  return (
-    Number(n) / 1048576
-  ).toFixed(1);
+function mb(bytes) {
+  return (bytes / 1048576).toFixed(1);
 }
 
-function uid() {
+function makeId() {
   return crypto
     .randomBytes(8)
     .toString("hex");
@@ -93,153 +65,285 @@ function uid() {
 
 function validUrl(value) {
   try {
-    const u = new URL(value);
+    const url = new URL(value);
 
     if (
-      !["http:", "https:"].includes(
-        u.protocol
-      )
+      url.protocol !== "http:" &&
+      url.protocol !== "https:"
     ) {
       return null;
     }
 
-    return u;
+    return url;
   } catch {
     return null;
   }
 }
 
-/* =========================
-   RUN COMMAND
-========================= */
+function isYouTube(url) {
+  try {
+    const host = new URL(url).hostname
+      .toLowerCase()
+      .replace(/^www\./, "");
 
-function run(
-  command,
-  args,
-  timeout =
-    JOB_TIMEOUT_SECONDS * 1000
-) {
-  return new Promise(
-    (resolve, reject) => {
+    return (
+      host === "youtube.com" ||
+      host === "m.youtube.com" ||
+      host === "youtu.be" ||
+      host === "music.youtube.com"
+    );
+  } catch {
+    return false;
+  }
+}
 
-      let p;
+function run(command, args, timeoutMs) {
+  const timeout =
+    timeoutMs ||
+    JOB_TIMEOUT_SECONDS * 1000;
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      command,
+      args,
+      {
+        stdio: [
+          "ignore",
+          "pipe",
+          "pipe"
+        ]
+      }
+    );
+
+    let stdout = "";
+    let stderr = "";
+    let finished = false;
+
+    const timer = setTimeout(() => {
+      if (finished) return;
 
       try {
-        p = spawn(
-          command,
-          args,
-          {
-            stdio: [
-              "ignore",
-              "pipe",
-              "pipe"
-            ]
-          }
-        );
-      } catch (error) {
-        reject(error);
+        child.kill("SIGKILL");
+      } catch {}
+
+      finished = true;
+
+      reject(
+        new Error(
+          "انتهت مهلة معالجة الفيديو."
+        )
+      );
+    }, timeout);
+
+    child.stdout.on("data", data => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on("data", data => {
+      stderr += data.toString();
+    });
+
+    child.on("error", error => {
+      if (finished) return;
+
+      finished = true;
+      clearTimeout(timer);
+
+      reject(error);
+    });
+
+    child.on("close", code => {
+      if (finished) return;
+
+      finished = true;
+      clearTimeout(timer);
+
+      if (code === 0) {
+        resolve({
+          stdout,
+          stderr
+        });
         return;
       }
 
-      let out = "";
-      let err = "";
-      let finished = false;
-
-      function fail(error) {
-        if (finished) return;
-
-        finished = true;
-
-        clearTimeout(timer);
-
-        reject(error);
-      }
-
-      const timer = setTimeout(
-        () => {
-
-          try {
-            p.kill("SIGKILL");
-          } catch {}
-
-          fail(
-            new Error(
-              "انتهت مهلة المعالجة."
-            )
-          );
-
-        },
-        timeout
+      reject(
+        new Error(
+          `${command} failed (${code})\n` +
+          stderr.slice(-5000)
+        )
       );
-
-      p.stdout.on(
-        "data",
-        data => {
-          out += data.toString();
-        }
-      );
-
-      p.stderr.on(
-        "data",
-        data => {
-          err += data.toString();
-        }
-      );
-
-      p.on(
-        "error",
-        error => {
-          fail(error);
-        }
-      );
-
-      p.on(
-        "close",
-        code => {
-
-          if (finished) return;
-
-          finished = true;
-
-          clearTimeout(timer);
-
-          if (code === 0) {
-
-            resolve({
-              out,
-              err
-            });
-
-          } else {
-
-            reject(
-              new Error(
-                `${command} failed (${code})\n` +
-                err.slice(-4000)
-              )
-            );
-
-          }
-        }
-      );
-    }
-  );
+    });
+  });
 }
 
-/* =========================
-   DOWNLOAD VIDEO
-========================= */
+/*
+ * ----------------------------------------------------
+ * yt-dlp arguments
+ * ----------------------------------------------------
+ */
+
+function ytDlpBaseArgs() {
+  const args = [
+    "--no-playlist",
+    "--no-warnings",
+    "--ignore-config"
+  ];
+
+  /*
+   * إذا وضعنا ملف Cookies في Environment Variable
+   * يمكن استخدامه بدون وضعه داخل GitHub.
+   *
+   * YT_COOKIES_FILE=/app/cookies.txt
+   */
+  if (process.env.YT_COOKIES_FILE) {
+    args.push(
+      "--cookies",
+      process.env.YT_COOKIES_FILE
+    );
+  }
+
+  /*
+   * User-Agent اختياري.
+   */
+  if (process.env.YT_USER_AGENT) {
+    args.push(
+      "--user-agent",
+      process.env.YT_USER_AGENT
+    );
+  }
+
+  return args;
+}
+
+/*
+ * نحاول أكثر من YouTube client.
+ * هذا لا يتجاوز DRM أو المحتوى الخاص.
+ */
+function youtubeClientArgs() {
+  return [
+    "--extractor-args",
+    "youtube:player-client=web_embedded,tv"
+  ];
+}
+
+/*
+ * ----------------------------------------------------
+ * استخراج معلومات الفيديو
+ * ----------------------------------------------------
+ */
+
+async function getVideoInfo(url) {
+  const attempts = [];
+
+  /*
+   * المحاولة الأولى:
+   * web_embedded + tv
+   */
+  attempts.push([
+    ...ytDlpBaseArgs(),
+    ...youtubeClientArgs(),
+    "--dump-single-json",
+    "--skip-download",
+    url
+  ]);
+
+  /*
+   * المحاولة الثانية:
+   * الإعداد الافتراضي لـ yt-dlp
+   */
+  attempts.push([
+    ...ytDlpBaseArgs(),
+    "--dump-single-json",
+    "--skip-download",
+    url
+  ]);
+
+  let lastError = null;
+
+  for (const args of attempts) {
+    try {
+      const result = await run(
+        "yt-dlp",
+        args,
+        120000
+      );
+
+      const data =
+        JSON.parse(result.stdout);
+
+      return data;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError ||
+    new Error(
+      "تعذر استخراج معلومات الفيديو."
+    );
+}
+
+/*
+ * ----------------------------------------------------
+ * اختيار صيغة الفيديو
+ * ----------------------------------------------------
+ */
+
+function formatForQuality(quality) {
+  switch (quality) {
+    case "720":
+      return [
+        "bv*[height<=720][ext=mp4]+ba[ext=m4a]/",
+        "bv*[height<=720]+ba/",
+        "b[height<=720][ext=mp4]/",
+        "b[height<=720]/b"
+      ].join("");
+
+    case "480":
+      return [
+        "bv*[height<=480][ext=mp4]+ba[ext=m4a]/",
+        "bv*[height<=480]+ba/",
+        "b[height<=480][ext=mp4]/",
+        "b[height<=480]/b"
+      ].join("");
+
+    case "360":
+      return [
+        "bv*[height<=360][ext=mp4]+ba[ext=m4a]/",
+        "bv*[height<=360]+ba/",
+        "b[height<=360][ext=mp4]/",
+        "b[height<=360]/b"
+      ].join("");
+
+    case "240":
+      return [
+        "bv*[height<=240][ext=mp4]+ba[ext=m4a]/",
+        "bv*[height<=240]+ba/",
+        "b[height<=240][ext=mp4]/",
+        "b[height<=240]/b"
+      ].join("");
+
+    default:
+      return "bv*+ba/b";
+  }
+}
+
+/*
+ * ----------------------------------------------------
+ * تنزيل الفيديو
+ * ----------------------------------------------------
+ */
 
 async function downloadVideo(
   url,
-  output
+  output,
+  quality
 ) {
+  const valid = validUrl(url);
 
-  const u = validUrl(url);
-
-  if (!u) {
+  if (!valid) {
     throw new Error(
-      "الرابط غير صالح."
+      "❌ الرابط غير صالح."
     );
   }
 
@@ -247,189 +351,141 @@ async function downloadVideo(
     MAX_DOWNLOAD_MB *
     1048576;
 
-  /*
-   * نحاول عدة YouTube clients.
-   * إذا رفض YouTube أحدها ننتقل للذي بعده.
-   */
-
-  const clients = [
-    "web_embedded",
-    "tv_embedded",
-    "android_vr"
+  const args = [
+    ...ytDlpBaseArgs()
   ];
 
-  let lastError = null;
-
-  for (
-    const client of clients
-  ) {
-
-    try {
-
-      console.log(
-        `🎬 محاولة تنزيل الرابط باستخدام: ${client}`
-      );
-
-      await run(
-        "yt-dlp",
-        [
-          "--no-playlist",
-
-          "--no-warnings",
-
-          "--force-ipv4",
-
-          "--extractor-args",
-          `youtube:player_client=${client}`,
-
-          "-f",
-          "bv*+ba/b",
-
-          "--merge-output-format",
-          "mp4",
-
-          "--retries",
-          "3",
-
-          "--fragment-retries",
-          "3",
-
-          "--socket-timeout",
-          "30",
-
-          "-o",
-          output,
-
-          u.href
-        ]
-      );
-
-      const stat =
-        await fsp
-          .stat(output)
-          .catch(
-            () => null
-          );
-
-      if (
-        !stat ||
-        !stat.size
-      ) {
-
-        throw new Error(
-          "لم يتم الحصول على ملف الفيديو."
-        );
-
-      }
-
-      if (
-        stat.size >
-        maxBytes
-      ) {
-
-        throw new Error(
-          "الفيديو أكبر من الحد المسموح به " +
-          MAX_DOWNLOAD_MB +
-          " MB."
-        );
-
-      }
-
-      console.log(
-        `✅ تم تنزيل الفيديو بنجاح باستخدام ${client}`
-      );
-
-      return stat.size;
-
-    } catch (error) {
-
-      lastError = error;
-
-      console.error(
-        `❌ فشل ${client}:`,
-        error.message
-      );
-
-      await fsp
-        .rm(
-          output,
-          {
-            force: true
-          }
-        )
-        .catch(() => {});
-    }
+  if (isYouTube(url)) {
+    args.push(
+      ...youtubeClientArgs()
+    );
   }
 
-  throw new Error(
-    "تعذر تنزيل الفيديو من YouTube حاليًا.\n\n" +
-    "قد يكون YouTube قد طلب التحقق من أن الطلب ليس آليًا، " +
-    "أو أن عنوان IP الخاص بالسيرفر محظور مؤقتًا.\n\n" +
-    String(
-      lastError?.message ||
-      "خطأ غير معروف"
-    ).slice(0, 1800)
+  args.push(
+    "-f",
+    formatForQuality(quality),
+
+    "--merge-output-format",
+    "mp4",
+
+    "--retries",
+    "3",
+
+    "--fragment-retries",
+    "3",
+
+    "--concurrent-fragments",
+    "2",
+
+    "-o",
+    output,
+
+    url
   );
+
+  await run(
+    "yt-dlp",
+    args,
+    JOB_TIMEOUT_SECONDS * 1000
+  );
+
+  const stat =
+    await fsp
+      .stat(output)
+      .catch(() => null);
+
+  if (!stat || !stat.size) {
+    throw new Error(
+      "لم يتم الحصول على ملف فيديو."
+    );
+  }
+
+  if (stat.size > maxBytes) {
+    throw new Error(
+      `الفيديو الأصلي أكبر من الحد المسموح ${MAX_DOWNLOAD_MB} MB.`
+    );
+  }
+
+  return stat.size;
 }
 
-/* =========================
-   FFPROBE
-========================= */
+/*
+ * ----------------------------------------------------
+ * معلومات الملف
+ * ----------------------------------------------------
+ */
 
-async function probe(
-  file
-) {
+async function probe(file) {
+  const result = await run(
+    "ffprobe",
+    [
+      "-v",
+      "error",
 
-  const result =
-    await run(
-      "ffprobe",
-      [
-        "-v",
-        "error",
+      "-show_entries",
+      "format=duration,size",
 
-        "-show_entries",
-        "format=duration,size",
+      "-of",
+      "json",
 
-        "-of",
-        "json",
-
-        file
-      ]
-    );
+      file
+    ],
+    60000
+  );
 
   const data =
-    JSON.parse(
-      result.out
-    );
+    JSON.parse(result.stdout);
 
   return {
-
     duration:
       Number(
-        data.format?.duration ||
-        0
+        data.format?.duration || 0
       ),
 
     size:
       Number(
-        data.format?.size ||
-        0
+        data.format?.size || 0
       )
   };
 }
 
-/* =========================
-   COMPRESS VIDEO
-========================= */
+/*
+ * ----------------------------------------------------
+ * ضغط الفيديو
+ * ----------------------------------------------------
+ */
 
-async function compress(
+async function compressVideo(
   input,
   output,
-  mode
+  quality
 ) {
+  let width = 960;
+  let crf = 29;
+  let audioBitrate = "96k";
+
+  if (quality === "720") {
+    width = 1280;
+    crf = 27;
+  }
+
+  if (quality === "480") {
+    width = 854;
+    crf = 29;
+  }
+
+  if (quality === "360") {
+    width = 640;
+    crf = 31;
+  }
+
+  if (quality === "240") {
+    width = 426;
+    crf = 33;
+    audioBitrate = "64k";
+  }
 
   const args = [
-
     "-y",
 
     "-i",
@@ -438,256 +494,503 @@ async function compress(
     "-map",
     "0:v:0",
 
+    "-vf",
+    `scale='min(${width},iw)':-2`,
+
     "-c:v",
     "libx264",
 
     "-preset",
     "veryfast",
 
+    "-crf",
+    String(crf),
+
     "-pix_fmt",
     "yuv420p",
 
     "-movflags",
-    "+faststart"
+    "+faststart",
+
+    "-map",
+    "0:a?",
+
+    "-c:a",
+    "aac",
+
+    "-b:a",
+    audioBitrate,
+
+    output
   ];
 
-  if (
-    mode === "strong"
-  ) {
+  await run(
+    "ffmpeg",
+    args,
+    JOB_TIMEOUT_SECONDS * 1000
+  );
+}
 
-    args.push(
+/*
+ * ----------------------------------------------------
+ * ضغط تلقائي إلى أقل من 45MB قدر الإمكان
+ * ----------------------------------------------------
+ */
 
-      "-vf",
-      "scale='min(854,iw)':-2",
+async function compressAuto(
+  input,
+  output,
+  duration
+) {
+  const TARGET_MB = 45;
 
-      "-crf",
-      "32",
-
-      "-maxrate",
-      "800k",
-
-      "-bufsize",
-      "1600k"
-    );
-
-  } else if (
-    mode === "quality"
-  ) {
-
-    args.push(
-
-      "-vf",
-      "scale='min(1280,iw)':-2",
-
-      "-crf",
-      "27",
-
-      "-maxrate",
-      "2200k",
-
-      "-bufsize",
-      "4400k"
-    );
-
-  } else {
-
-    args.push(
-
-      "-vf",
-      "scale='min(960,iw)':-2",
-
-      "-crf",
-      "29",
-
-      "-maxrate",
-      "1400k",
-
-      "-bufsize",
-      "2800k"
+  if (!duration || duration <= 0) {
+    return compressVideo(
+      input,
+      output,
+      "480"
     );
   }
 
-  if (
-    mode === "mute"
-  ) {
+  /*
+   * نترك مساحة بسيطة للصوت والحاوية.
+   */
+  const targetBits =
+    TARGET_MB *
+    1024 *
+    1024 *
+    8 *
+    0.94;
 
+  const audioKbps = 64;
+
+  let videoKbps =
+    Math.floor(
+      targetBits /
+      duration /
+      1000
+    ) - audioKbps;
+
+  videoKbps = Math.max(
+    150,
+    Math.min(
+      videoKbps,
+      2500
+    )
+  );
+
+  const args = [
+    "-y",
+
+    "-i",
+    input,
+
+    "-map",
+    "0:v:0",
+
+    "-vf",
+    "scale='min(854,iw)':-2",
+
+    "-c:v",
+    "libx264",
+
+    "-preset",
+    "veryfast",
+
+    "-b:v",
+    `${videoKbps}k`,
+
+    "-maxrate",
+    `${videoKbps}k`,
+
+    "-bufsize",
+    `${videoKbps * 2}k`,
+
+    "-map",
+    "0:a?",
+
+    "-c:a",
+    "aac",
+
+    "-b:a",
+    `${audioKbps}k`,
+
+    "-movflags",
+    "+faststart",
+
+    output
+  ];
+
+  await run(
+    "ffmpeg",
+    args,
+    JOB_TIMEOUT_SECONDS * 1000
+  );
+}
+
+/*
+ * ----------------------------------------------------
+ * MP3
+ * ----------------------------------------------------
+ */
+
+async function downloadAudio(
+  url,
+  output
+) {
+  const args = [
+    ...ytDlpBaseArgs()
+  ];
+
+  if (isYouTube(url)) {
     args.push(
-      "-an"
-    );
-
-  } else {
-
-    args.push(
-
-      "-map",
-      "0:a?",
-
-      "-c:a",
-      "aac",
-
-      "-b:a",
-      "96k"
+      ...youtubeClientArgs()
     );
   }
 
   args.push(
-    output
+    "-f",
+    "ba/b",
+
+    "--extract-audio",
+
+    "--audio-format",
+    "mp3",
+
+    "--audio-quality",
+    "128K",
+
+    "-o",
+    output,
+
+    url
   );
 
   await run(
-    "ffmpeg",
-    args
+    "yt-dlp",
+    args,
+    JOB_TIMEOUT_SECONDS * 1000
   );
+
+  const stat =
+    await fsp
+      .stat(output)
+      .catch(() => null);
+
+  if (!stat || !stat.size) {
+    throw new Error(
+      "تعذر استخراج الصوت."
+    );
+  }
+
+  return stat.size;
 }
 
-/* =========================
-   KEYBOARD
-========================= */
+/*
+ * ----------------------------------------------------
+ * لوحة الجودة
+ * ----------------------------------------------------
+ */
 
-function keyboard() {
-
+function qualityKeyboard() {
   return Markup.inlineKeyboard([
-
     [
       Markup.button.callback(
-        "🟢 أقصى ضغط",
-        "c:strong"
+        "🎬 HD 720p",
+        "q:720"
+      ),
+      Markup.button.callback(
+        "📺 SD 480p ⭐",
+        "q:480"
       )
     ],
 
     [
       Markup.button.callback(
-        "🟡 ضغط متوازن",
-        "c:balanced"
+        "📉 Low 360p",
+        "q:360"
+      ),
+      Markup.button.callback(
+        "📱 Mobile 240p",
+        "q:240"
       )
     ],
 
     [
       Markup.button.callback(
-        "🔵 جودة أفضل",
-        "c:quality"
+        "⚡ ضغط تلقائي (<45MB)",
+        "q:auto"
+      ),
+      Markup.button.callback(
+        "🎵 صوت فقط (MP3)",
+        "q:mp3"
       )
     ],
 
     [
       Markup.button.callback(
-        "🔇 بدون صوت",
-        "c:mute"
+        "❌ إلغاء العملية",
+        "q:cancel"
       )
     ]
-
   ]);
 }
 
-/* =========================
-   START
-========================= */
+/*
+ * ----------------------------------------------------
+ * /start
+ * ----------------------------------------------------
+ */
 
-bot.start(
-  async ctx => {
+bot.start(async ctx => {
+  await ctx.reply(
+    "👋 مرحباً بك في بوت تحميل وضغط الفيديوهات 🎬\n\n" +
 
-    await ctx.reply(
+    "📌 أرسل رابط الفيديو فقط.\n\n" +
 
-      "🎬 أهلاً بك في بوت ضغط الفيديو وتوفير الإنترنت.\n\n" +
+    "🌐 يدعم الروابط العامة من المواقع التي يدعمها yt-dlp.\n\n" +
 
-      "📎 أرسل رابط الفيديو مباشرة.\n\n" +
+    "بعد إرسال الرابط سأقوم بفحص الفيديو وإظهار:\n" +
 
-      "يدعم البوت روابط الفيديو العامة التي يستطيع yt-dlp الوصول إليها.\n\n" +
+    "• 🎬 العنوان\n" +
+    "• ⏱️ المدة\n" +
+    "• 📐 الدقة\n" +
+    "• 📦 الحجم التقريبي\n" +
 
-      "بعد إرسال الرابط اختر مستوى الضغط، " +
-      "وسأقوم بتنزيل الفيديو وضغطه وإرسال النسخة المضغوطة لك.\n\n" +
+    "\nثم تختار الجودة التي تريدها.\n\n" +
 
-      "⚠️ لا يدعم المحتوى الذي يتطلب تسجيل دخول أو DRM."
+    "🚀 بعدها يتم التنزيل والضغط بواسطة FFmpeg."
+  );
+});
 
+/*
+ * ----------------------------------------------------
+ * استقبال الرابط
+ * ----------------------------------------------------
+ */
+
+bot.on("text", async ctx => {
+  const text =
+    ctx.message.text.trim();
+
+  if (text.startsWith("/")) {
+    return;
+  }
+
+  const url = validUrl(text);
+
+  if (!url) {
+    return ctx.reply(
+      "❌ أرسل رابط فيديو صحيح يبدأ بـ http:// أو https://"
     );
   }
-);
 
-/* =========================
-   RECEIVE URL
-========================= */
+  /*
+   * منع المستخدم من تشغيل أكثر من عملية
+   */
+  if (jobs.has(ctx.from.id)) {
+    return ctx.reply(
+      "⏳ لديك عملية قيد التنفيذ بالفعل. انتظر حتى تنتهي."
+    );
+  }
 
-bot.on(
-  "text",
-  async ctx => {
+  const status =
+    await ctx.reply(
+      "🔎 جاري فحص الفيديو واستخراج معلوماته..."
+    );
 
-    const text =
-      ctx.message.text.trim();
-
-    if (
-      text.startsWith("/")
-    ) {
-      return;
-    }
-
-    const u =
-      validUrl(text);
-
-    if (!u) {
-
-      return ctx.reply(
-        "❌ أرسل رابطًا صحيحًا يبدأ بـ http:// أو https://"
+  try {
+    const info =
+      await getVideoInfo(
+        url.href
       );
-    }
+
+    const duration =
+      Number(info.duration || 0);
+
+    const width =
+      Number(info.width || 0);
+
+    const height =
+      Number(info.height || 0);
+
+    const size =
+      Number(info.filesize || info.filesize_approx || 0);
+
+    const title =
+      String(
+        info.title ||
+        "فيديو بدون عنوان"
+      );
+
+    const uploader =
+      String(
+        info.uploader ||
+        info.channel ||
+        "غير معروف"
+      );
 
     jobs.set(
       ctx.from.id,
       {
-        url: u.href
+        url: url.href,
+        info
       }
     );
 
-    await ctx.reply(
+    const minutes =
+      Math.floor(duration / 60);
 
-      "🔗 تم استلام الرابط بنجاح.\n\n" +
+    const seconds =
+      Math.floor(duration % 60)
+        .toString()
+        .padStart(2, "0");
 
-      "اختر طريقة ضغط الفيديو:",
+    const durationText =
+      duration
+        ? `${minutes}:${seconds}`
+        : "غير معروف";
 
-      keyboard()
+    const resolution =
+      width && height
+        ? `${width}x${height}`
+        : "غير معروف";
+
+    const sizeText =
+      size
+        ? `${mb(size)} MB`
+        : "غير معروف";
+
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      status.message_id,
+      undefined,
+
+      "📹 تفاصيل الفيديو المطلوبة:\n" +
+      "━━━━━━━━━━━━━━━━━━\n\n" +
+
+      `📌 العنوان: ${title.slice(0, 500)}\n\n` +
+
+      `⏱️ المدة: ${durationText}\n\n` +
+
+      `📐 الدقة الأصلية: ${resolution}\n\n` +
+
+      `📦 الحجم التقريبي: ${sizeText}\n\n` +
+
+      `👤 الناشر: ${uploader.slice(0, 200)}\n\n` +
+
+      "━━━━━━━━━━━━━━━━━━\n\n" +
+
+      "👇 اختر الجودة وطريقة الضغط المطلوبة:"
+      ,
+      qualityKeyboard()
     );
-  }
-);
 
-/* =========================
-   COMPRESSION ACTION
-========================= */
+  } catch (error) {
+    console.error(
+      "INFO ERROR:",
+      error
+    );
 
-bot.action(
-  /^c:(strong|balanced|quality|mute)$/,
-  async ctx => {
+    jobs.delete(
+      ctx.from.id
+    );
 
-    const job =
-      jobs.get(
-        ctx.from.id
+    let message =
+      "❌ لم أستطع قراءة الفيديو.";
+
+    const errorText =
+      String(
+        error.message || ""
       );
 
-    if (!job) {
+    if (
+      isYouTube(url.href) &&
+      (
+        errorText.includes(
+          "Sign in to confirm"
+        ) ||
+        errorText.includes(
+          "not a bot"
+        ) ||
+        errorText.includes(
+          "cookies"
+        )
+      )
+    ) {
+      message =
+        "❌ YouTube رفض طلب التحميل بسبب حماية مكافحة الروبوتات.\n\n" +
 
+        "هذا ليس خطأ في FFmpeg أو البوت نفسه.\n\n" +
+
+        "يمكن تشغيل الفيديوهات التي يسمح YouTube باستخراجها، " +
+        "أما الفيديوهات التي تتطلب جلسة/ملفات Cookies فلابد من إعداد Cookies لـ yt-dlp على الخادم.";
+    }
+
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      status.message_id,
+      undefined,
+      message
+    );
+  }
+});
+
+/*
+ * ----------------------------------------------------
+ * اختيار الجودة
+ * ----------------------------------------------------
+ */
+
+bot.action(
+  /^q:(720|480|360|240|auto|mp3|cancel)$/,
+  async ctx => {
+    const userId =
+      ctx.from.id;
+
+    const job =
+      jobs.get(userId);
+
+    if (!job) {
       return ctx.answerCbQuery(
-        "❌ أرسل الرابط أولًا."
+        "أرسل رابط فيديو أولاً."
       );
     }
 
     const mode =
       ctx.match[1];
 
-    await ctx.answerCbQuery(
-      "⏳ بدأت المعالجة..."
-    );
+    if (mode === "cancel") {
+      jobs.delete(userId);
 
-    const status =
-      await ctx.reply(
-        "⏳ جاري تنزيل الفيديو من الرابط..."
+      await ctx.answerCbQuery(
+        "تم إلغاء العملية."
       );
 
-    const id =
-      uid();
+      return ctx.editMessageText(
+        "❌ تم إلغاء العملية."
+      );
+    }
+
+    await ctx.answerCbQuery(
+      "بدأت المعالجة..."
+    );
+
+    const workId =
+      makeId();
 
     const dir =
       path.join(
-        root,
-        id
+        ROOT,
+        workId
       );
+
+    await fsp.mkdir(
+      dir,
+      {
+        recursive: true
+      }
+    );
 
     const input =
       path.join(
@@ -698,60 +1001,87 @@ bot.action(
     const output =
       path.join(
         dir,
-        "compressed.mp4"
+        mode === "mp3"
+          ? "audio.mp3"
+          : "compressed.mp4"
       );
 
-    await fsp.mkdir(
-      dir,
-      {
-        recursive: true
-      }
-    );
+    const status =
+      await ctx.reply(
+        "⏳ جاري تنزيل الفيديو..."
+      );
 
     try {
+      let downloadedSize = 0;
 
-      /* تنزيل */
+      if (mode === "mp3") {
+        downloadedSize =
+          await downloadAudio(
+            job.url,
+            output
+          );
+      } else {
+        downloadedSize =
+          await downloadVideo(
+            job.url,
+            input,
+            mode === "auto"
+              ? "480"
+              : mode
+          );
+      }
 
-      const downloaded =
-        await downloadVideo(
-          job.url,
-          input
+      if (mode === "mp3") {
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          status.message_id,
+          undefined,
+          `🎵 تم استخراج الصوت.\n\n📦 الحجم: ${mb(downloadedSize)} MB\n\n📤 جاري إرسال الملف...`
         );
 
-      /* معلومات الفيديو */
-
-      const source =
-        await probe(
-          input
+        await ctx.replyWithAudio(
+          {
+            source: output
+          },
+          {
+            caption:
+              "🎵 تم استخراج الصوت وتحويله إلى MP3 بنجاح."
+          }
         );
+
+        return;
+      }
+
+      const original =
+        await probe(input);
 
       await ctx.telegram.editMessageText(
-
         ctx.chat.id,
-
         status.message_id,
-
         undefined,
 
-        `📥 تم تنزيل الفيديو بنجاح.\n\n` +
+        `📥 تم تنزيل الفيديو.\n\n` +
 
-        `📦 الحجم الأصلي: ${mb(downloaded)} MB\n\n` +
+        `📦 الحجم الأصلي: ${mb(original.size)} MB\n\n` +
 
-        `⚙️ جاري ضغط الفيديو بواسطة FFmpeg...`
-
+        `⚙️ جاري الضغط الحقيقي بواسطة FFmpeg...`
       );
 
-      /* ضغط */
+      if (mode === "auto") {
+        await compressAuto(
+          input,
+          output,
+          original.duration
+        );
+      } else {
+        await compressVideo(
+          input,
+          output,
+          mode
+        );
+      }
 
-      await compress(
-        input,
-        output,
-        mode
-      );
-
-      /* الحجم النهائي */
-
-      const out =
+      const compressed =
         await fsp.stat(
           output
         );
@@ -759,169 +1089,136 @@ bot.action(
       const saved =
         Math.max(
           0,
-          source.size -
-          out.size
+          original.size -
+          compressed.size
         );
 
-      const percentage =
-        source.size
+      const percent =
+        original.size
           ? (
               saved /
-              source.size
+              original.size
             ) * 100
           : 0;
 
       await ctx.telegram.editMessageText(
-
         ctx.chat.id,
-
         status.message_id,
-
         undefined,
 
-        `✅ اكتمل ضغط الفيديو!\n\n` +
+        "✅ اكتمل الضغط بنجاح!\n\n" +
 
-        `📦 قبل: ${mb(source.size)} MB\n` +
+        `📦 قبل: ${mb(original.size)} MB\n` +
 
-        `📉 بعد: ${mb(out.size)} MB\n` +
+        `📉 بعد: ${mb(compressed.size)} MB\n` +
 
-        `💾 التوفير: ${percentage.toFixed(1)}%\n\n` +
+        `💾 التوفير: ${percent.toFixed(1)}%\n\n` +
 
-        `📤 جاري إرسال الفيديو...`
-
+        "📤 جاري إرسال الفيديو..."
       );
 
-      /* إرسال الفيديو */
-
       await ctx.replyWithVideo(
-
         {
           source: output
         },
-
         {
+          supports_streaming: true,
+
           caption:
+            "🎬 الفيديو المضغوط\n\n" +
 
-            `🎬 الفيديو المضغوط\n\n` +
+            `📦 ${mb(original.size)} MB → ${mb(compressed.size)} MB\n` +
 
-            `📦 ${mb(source.size)} MB → ${mb(out.size)} MB\n` +
-
-            `💾 تم توفير ${percentage.toFixed(1)}%`
-
+            `💾 توفير ${percent.toFixed(1)}%`
         }
       );
 
-      await ctx.telegram
-        .deleteMessage(
-          ctx.chat.id,
-          status.message_id
-        )
-        .catch(() => {});
+      await ctx.telegram.deleteMessage(
+        ctx.chat.id,
+        status.message_id
+      ).catch(() => {});
 
     } catch (error) {
-
       console.error(
-        "❌ Processing error:",
+        "PROCESS ERROR:",
         error
       );
 
-      await ctx.telegram
-        .editMessageText(
+      const errorText =
+        String(
+          error.message || ""
+        );
 
-          ctx.chat.id,
+      let message =
+        "❌ لم أستطع معالجة الفيديو.";
 
-          status.message_id,
-
-          undefined,
-
-          `❌ لم أستطع معالجة الرابط.\n\n` +
-
-          String(
-            error.message ||
-            error
-          ).slice(
-            0,
-            1500
+      if (
+        isYouTube(job.url) &&
+        (
+          errorText.includes(
+            "Sign in to confirm"
+          ) ||
+          errorText.includes(
+            "not a bot"
+          ) ||
+          errorText.includes(
+            "cookies"
           )
-
         )
-        .catch(() => {});
-    }
+      ) {
+        message =
+          "❌ YouTube رفض عملية التحميل.\n\n" +
 
-    finally {
+          "🔐 السبب: حماية YouTube من الطلبات الآلية.\n\n" +
 
-      jobs.delete(
-        ctx.from.id
-      );
+          "إذا كان الفيديو عامًا وقابلًا للاستخراج فقد يعمل تلقائيًا، " +
 
-      await fsp
-        .rm(
-          dir,
-          {
-            recursive: true,
-            force: true
-          }
-        )
-        .catch(() => {});
+          "أما إذا طلب YouTube تسجيل الدخول أو Cookies فيجب إعداد Cookies لـ yt-dlp على Render.";
+      }
+
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        status.message_id,
+        undefined,
+        message
+      ).catch(() => {});
+
+    } finally {
+      jobs.delete(userId);
+
+      await fsp.rm(
+        dir,
+        {
+                    force: true
+        }
+      ).catch(() => {});
     }
   }
 );
 
-/* =========================
-   BOT ERROR
-========================= */
+// معالجة أخطاء البوت
+bot.catch((error) => {
+  console.error("❌ Bot error:", error);
+});
 
-bot.catch(
-  error => {
-
-    console.error(
-      "🤖 Bot error:",
-      error
-    );
-
-  }
-);
-
-/* =========================
-   START BOT
-========================= */
-
-bot.launch({
-  dropPendingUpdates: true
-})
-.then(
-  () => {
-    console.log(
-      "🤖 Bot started successfully."
-    );
-  }
-)
-.catch(
-  error => {
-
-    console.error(
-      "❌ Failed to start Telegram bot:",
-      error
-    );
-
+// تشغيل البوت
+bot.launch()
+  .then(() => {
+    console.log("🤖 Bot started successfully.");
+  })
+  .catch((error) => {
+    console.error("❌ Failed to start bot:", error);
     process.exit(1);
-  }
-);
+  });
 
-/* =========================
-   SHUTDOWN
-========================= */
+// إيقاف البوت بشكل آمن
+process.once("SIGINT", () => {
+  console.log("🛑 Stopping bot...");
+  bot.stop("SIGINT");
+});
 
-process.once(
-  "SIGINT",
-  () => {
-    bot.stop("SIGINT");
-  }
-);
-
-process.once(
-  "SIGTERM",
-  () => {
-    bot.stop("SIGTERM");
-  }
-);
+process.once("SIGTERM", () => {
+  console.log("🛑 Stopping bot...");
+  bot.stop("SIGTERM");
+});
+          recursive: true,
