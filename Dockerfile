@@ -1,30 +1,20 @@
-FROM node:20-bookworm-slim
-
-# الأدوات المطلوبة
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-       ffmpeg \
-       python3 \
-       python3-pip \
-       curl \
-       ca-certificates \
-       unzip \
-    && rm -rf /var/lib/apt/lists/*
-
-# تثبيت Deno
-RUN curl -fsSL https://deno.land/install.sh | sh
-
-ENV DENO_INSTALL=/root/.deno
-ENV PATH=/root/.deno/bin:$PATH
-
-# تثبيت أحدث yt-dlp مع دعم EJS
-RUN python3 -m pip install \
-    --break-system-packages \
-    --no-cache-dir \
-    -U "yt-dlp[default]" \
-    yt-dlp-ejs
+FROM node:20-bookworm
 
 WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y \
+        ffmpeg \
+        python3 \
+        python3-pip \
+        ca-certificates \
+        curl \
+    && pip3 install --break-system-packages --no-cache-dir -U yt-dlp \
+    && yt-dlp --version \
+    && ffmpeg -version \
+    && ffprobe -version \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
 
