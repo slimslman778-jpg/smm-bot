@@ -1,5 +1,6 @@
 const express = require("express");
 const { Telegraf, Markup } = require("telegraf");
+
 const fs = require("fs");
 const fsp = fs.promises;
 const path = require("path");
@@ -8,31 +9,60 @@ const crypto = require("crypto");
 const { spawn } = require("child_process");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const PORT = Number(process.env.PORT || 3000);
-const MAX_DOWNLOAD_MB = Number(process.env.MAX_DOWNLOAD_MB || 500);
-const JOB_TIMEOUT_SECONDS =
-  Number(process.env.JOB_TIMEOUT_SECONDS || 900);
+
+const PORT = Number(
+  process.env.PORT || 3000
+);
+
+const MAX_DOWNLOAD_MB = Number(
+  process.env.MAX_DOWNLOAD_MB || 500
+);
+
+const JOB_TIMEOUT_SECONDS = Number(
+  process.env.JOB_TIMEOUT_SECONDS || 900
+);
 
 if (!BOT_TOKEN) {
   console.error("❌ BOT_TOKEN is missing");
   process.exit(1);
 }
 
+/* =========================
+   HTTP SERVER
+========================= */
+
 const app = express();
 
 app.get("/", (_, res) => {
-  res.send("✅ Telegram Video Compressor is running.");
+  res.send(
+    "✅ Telegram Video Compressor is running."
+  );
 });
 
 app.get("/health", (_, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    service: "telegram-video-compressor"
+  });
 });
 
 app.listen(PORT, () => {
-  console.log("HTTP server on " + PORT);
+  console.log(
+    "🌐 HTTP server on " + PORT
+  );
 });
 
-const bot = new Telegraf(BOT_TOKEN);
+/* =========================
+   TELEGRAM BOT
+========================= */
+
+const bot = new Telegraf(
+  BOT_TOKEN
+);
+
+/* =========================
+   JOBS
+========================= */
 
 const jobs = new Map();
 
@@ -45,12 +75,20 @@ fs.mkdirSync(root, {
   recursive: true
 });
 
+/* =========================
+   HELPERS
+========================= */
+
 function mb(n) {
-  return (n / 1048576).toFixed(1);
+  return (
+    Number(n) / 1048576
+  ).toFixed(1);
 }
 
 function uid() {
-  return crypto.randomBytes(8).toString("hex");
+  return crypto
+    .randomBytes(8)
+    .toString("hex");
 }
 
 function validUrl(value) {
@@ -71,25 +109,37 @@ function validUrl(value) {
   }
 }
 
+/* =========================
+   RUN COMMAND
+========================= */
+
 function run(
   command,
   args,
-  timeout = JOB_TIMEOUT_SECONDS * 1000
+  timeout =
+    JOB_TIMEOUT_SECONDS * 1000
 ) {
   return new Promise(
     (resolve, reject) => {
 
-      const p = spawn(
-        command,
-        args,
-        {
-          stdio: [
-            "ignore",
-            "pipe",
-            "pipe"
-          ]
-        }
-      );
+      let p;
+
+      try {
+        p = spawn(
+          command,
+          args,
+          {
+            stdio: [
+              "ignore",
+              "pipe",
+              "pipe"
+            ]
+          }
+        );
+      } catch (error) {
+        reject(error);
+        return;
+      }
 
       let out = "";
       let err = "";
@@ -99,6 +149,8 @@ function run(
         if (finished) return;
 
         finished = true;
+
+        clearTimeout(timer);
 
         reject(error);
       }
@@ -136,18 +188,20 @@ function run(
 
       p.on(
         "error",
-        fail
+        error => {
+          fail(error);
+        }
       );
 
       p.on(
         "close",
         code => {
 
-          clearTimeout(timer);
-
           if (finished) return;
 
           finished = true;
+
+          clearTimeout(timer);
 
           if (code === 0) {
 
@@ -160,22 +214,21 @@ function run(
 
             reject(
               new Error(
-                command +
-                " failed (" +
-                code +
-                ")\n" +
-                err.slice(-3500)
+                `${command} failed (${code})\n` +
+                err.slice(-4000)
               )
             );
 
           }
-
         }
       );
-
     }
   );
 }
+
+/* =========================
+   DOWNLOAD VIDEO
+========================= */
 
 async function downloadVideo(
   url,
@@ -191,59 +244,137 @@ async function downloadVideo(
   }
 
   const maxBytes =
-    MAX_DOWNLOAD_MB * 1048576;
+    MAX_DOWNLOAD_MB *
+    1048576;
 
-  await run(
-    "yt-dlp",
-    [
-      "--no-playlist",
+  /*
+   * نحاول عدة YouTube clients.
+   * إذا رفض YouTube أحدها ننتقل للذي بعده.
+   */
 
-      "--no-warnings",
+  const clients = [
+    "web_embedded",
+    "tv_embedded",
+    "android_vr"
+  ];
 
-      "-f",
-      "bv*+ba/b",
+  let lastError = null;
 
-      "--merge-output-format",
-      "mp4",
+  for (
+    const client of clients
+  ) {
 
-      "-o",
-      output,
+    try {
 
-      u.href
-    ]
+      console.log(
+        `🎬 محاولة تنزيل الرابط باستخدام: ${client}`
+      );
+
+      await run(
+        "yt-dlp",
+        [
+          "--no-playlist",
+
+          "--no-warnings",
+
+          "--force-ipv4",
+
+          "--extractor-args",
+          `youtube:player_client=${client}`,
+
+          "-f",
+          "bv*+ba/b",
+
+          "--merge-output-format",
+          "mp4",
+
+          "--retries",
+          "3",
+
+          "--fragment-retries",
+          "3",
+
+          "--socket-timeout",
+          "30",
+
+          "-o",
+          output,
+
+          u.href
+        ]
+      );
+
+      const stat =
+        await fsp
+          .stat(output)
+          .catch(
+            () => null
+          );
+
+      if (
+        !stat ||
+        !stat.size
+      ) {
+
+        throw new Error(
+          "لم يتم الحصول على ملف الفيديو."
+        );
+
+      }
+
+      if (
+        stat.size >
+        maxBytes
+      ) {
+
+        throw new Error(
+          "الفيديو أكبر من الحد المسموح به " +
+          MAX_DOWNLOAD_MB +
+          " MB."
+        );
+
+      }
+
+      console.log(
+        `✅ تم تنزيل الفيديو بنجاح باستخدام ${client}`
+      );
+
+      return stat.size;
+
+    } catch (error) {
+
+      lastError = error;
+
+      console.error(
+        `❌ فشل ${client}:`,
+        error.message
+      );
+
+      await fsp
+        .rm(
+          output,
+          {
+            force: true
+          }
+        )
+        .catch(() => {});
+    }
+  }
+
+  throw new Error(
+    "تعذر تنزيل الفيديو من YouTube حاليًا.\n\n" +
+    "قد يكون YouTube قد طلب التحقق من أن الطلب ليس آليًا، " +
+    "أو أن عنوان IP الخاص بالسيرفر محظور مؤقتًا.\n\n" +
+    String(
+      lastError?.message ||
+      "خطأ غير معروف"
+    ).slice(0, 1800)
   );
-
-  const stat =
-    await fsp
-      .stat(output)
-      .catch(() => null);
-
-  if (
-    !stat ||
-    !stat.size
-  ) {
-
-    throw new Error(
-      "لم يتم الحصول على ملف فيديو من الرابط."
-    );
-
-  }
-
-  if (
-    stat.size >
-    maxBytes
-  ) {
-
-    throw new Error(
-      "الفيديو أكبر من الحد التجريبي " +
-      MAX_DOWNLOAD_MB +
-      " MB."
-    );
-
-  }
-
-  return stat.size;
 }
+
+/* =========================
+   FFPROBE
+========================= */
 
 async function probe(
   file
@@ -272,6 +403,7 @@ async function probe(
     );
 
   return {
+
     duration:
       Number(
         data.format?.duration ||
@@ -285,6 +417,10 @@ async function probe(
       )
   };
 }
+
+/* =========================
+   COMPRESS VIDEO
+========================= */
 
 async function compress(
   input,
@@ -313,7 +449,6 @@ async function compress(
 
     "-movflags",
     "+faststart"
-
   ];
 
   if (
@@ -333,12 +468,9 @@ async function compress(
 
       "-bufsize",
       "1600k"
-
     );
 
-  }
-
-  else if (
+  } else if (
     mode === "quality"
   ) {
 
@@ -355,12 +487,9 @@ async function compress(
 
       "-bufsize",
       "4400k"
-
     );
 
-  }
-
-  else {
+  } else {
 
     args.push(
 
@@ -375,9 +504,7 @@ async function compress(
 
       "-bufsize",
       "2800k"
-
     );
-
   }
 
   if (
@@ -388,9 +515,7 @@ async function compress(
       "-an"
     );
 
-  }
-
-  else {
+  } else {
 
     args.push(
 
@@ -402,9 +527,7 @@ async function compress(
 
       "-b:a",
       "96k"
-
     );
-
   }
 
   args.push(
@@ -416,6 +539,10 @@ async function compress(
     args
   );
 }
+
+/* =========================
+   KEYBOARD
+========================= */
 
 function keyboard() {
 
@@ -450,26 +577,35 @@ function keyboard() {
     ]
 
   ]);
-
 }
 
+/* =========================
+   START
+========================= */
+
 bot.start(
-  ctx => {
+  async ctx => {
 
-    ctx.reply(
+    await ctx.reply(
 
-      "🎬 أهلاً بك في بوت توفير الإنترنت وضغط الفيديو.\n\n" +
+      "🎬 أهلاً بك في بوت ضغط الفيديو وتوفير الإنترنت.\n\n" +
 
-      "أرسل رابط فيديو عام من YouTube أو منصة يدعمها yt-dlp.\n\n" +
+      "📎 أرسل رابط الفيديو مباشرة.\n\n" +
 
-      "سأقوم بتنزيل الفيديو ثم ضغطه فعليًا بواسطة FFmpeg وإرسال النسخة المضغوطة لك.\n\n" +
+      "يدعم البوت روابط الفيديو العامة التي يستطيع yt-dlp الوصول إليها.\n\n" +
 
-      "⚠️ لا يمكن تجاوز DRM أو تسجيل الدخول."
+      "بعد إرسال الرابط اختر مستوى الضغط، " +
+      "وسأقوم بتنزيل الفيديو وضغطه وإرسال النسخة المضغوطة لك.\n\n" +
+
+      "⚠️ لا يدعم المحتوى الذي يتطلب تسجيل دخول أو DRM."
 
     );
-
   }
 );
+
+/* =========================
+   RECEIVE URL
+========================= */
 
 bot.on(
   "text",
@@ -492,7 +628,6 @@ bot.on(
       return ctx.reply(
         "❌ أرسل رابطًا صحيحًا يبدأ بـ http:// أو https://"
       );
-
     }
 
     jobs.set(
@@ -504,16 +639,18 @@ bot.on(
 
     await ctx.reply(
 
-      "🔗 تم استلام الرابط.\n\n" +
+      "🔗 تم استلام الرابط بنجاح.\n\n" +
 
-      "اختر طريقة الضغط:",
+      "اختر طريقة ضغط الفيديو:",
 
       keyboard()
-
     );
-
   }
 );
+
+/* =========================
+   COMPRESSION ACTION
+========================= */
 
 bot.action(
   /^c:(strong|balanced|quality|mute)$/,
@@ -527,16 +664,15 @@ bot.action(
     if (!job) {
 
       return ctx.answerCbQuery(
-        "أرسل الرابط أولًا."
+        "❌ أرسل الرابط أولًا."
       );
-
     }
 
     const mode =
       ctx.match[1];
 
     await ctx.answerCbQuery(
-      "بدأت المعالجة..."
+      "⏳ بدأت المعالجة..."
     );
 
     const status =
@@ -574,11 +710,15 @@ bot.action(
 
     try {
 
+      /* تنزيل */
+
       const downloaded =
         await downloadVideo(
           job.url,
           input
         );
+
+      /* معلومات الفيديو */
 
       const source =
         await probe(
@@ -593,19 +733,23 @@ bot.action(
 
         undefined,
 
-        `📥 تم التنزيل.\n\n` +
+        `📥 تم تنزيل الفيديو بنجاح.\n\n` +
 
         `📦 الحجم الأصلي: ${mb(downloaded)} MB\n\n` +
 
-        `⚙️ جاري الضغط الحقيقي بواسطة FFmpeg...`
+        `⚙️ جاري ضغط الفيديو بواسطة FFmpeg...`
 
       );
+
+      /* ضغط */
 
       await compress(
         input,
         output,
         mode
       );
+
+      /* الحجم النهائي */
 
       const out =
         await fsp.stat(
@@ -635,17 +779,19 @@ bot.action(
 
         undefined,
 
-        `✅ اكتمل الضغط!\n\n` +
+        `✅ اكتمل ضغط الفيديو!\n\n` +
 
         `📦 قبل: ${mb(source.size)} MB\n` +
 
         `📉 بعد: ${mb(out.size)} MB\n` +
 
-        `💾 تم توفير: ${percentage.toFixed(1)}%\n\n` +
+        `💾 التوفير: ${percentage.toFixed(1)}%\n\n` +
 
         `📤 جاري إرسال الفيديو...`
 
       );
+
+      /* إرسال الفيديو */
 
       await ctx.replyWithVideo(
 
@@ -660,10 +806,9 @@ bot.action(
 
             `📦 ${mb(source.size)} MB → ${mb(out.size)} MB\n` +
 
-            `💾 توفير ${percentage.toFixed(1)}%`
+            `💾 تم توفير ${percentage.toFixed(1)}%`
 
         }
-
       );
 
       await ctx.telegram
@@ -673,11 +818,10 @@ bot.action(
         )
         .catch(() => {});
 
-    }
-
-    catch (error) {
+    } catch (error) {
 
       console.error(
+        "❌ Processing error:",
         error
       );
 
@@ -693,15 +837,15 @@ bot.action(
           `❌ لم أستطع معالجة الرابط.\n\n` +
 
           String(
-            error.message
+            error.message ||
+            error
           ).slice(
             0,
-            1200
+            1500
           )
 
         )
         .catch(() => {});
-
     }
 
     finally {
@@ -710,42 +854,74 @@ bot.action(
         ctx.from.id
       );
 
-      await fsp.rm(
-        dir,
-        {
-          recursive: true,
-          force: true
-        }
-      ).catch(() => {});
-
+      await fsp
+        .rm(
+          dir,
+          {
+            recursive: true,
+            force: true
+          }
+        )
+        .catch(() => {});
     }
+  }
+);
+
+/* =========================
+   BOT ERROR
+========================= */
+
+bot.catch(
+  error => {
+
+    console.error(
+      "🤖 Bot error:",
+      error
+    );
 
   }
 );
 
-bot.catch(
-  error =>
+/* =========================
+   START BOT
+========================= */
+
+bot.launch({
+  dropPendingUpdates: true
+})
+.then(
+  () => {
+    console.log(
+      "🤖 Bot started successfully."
+    );
+  }
+)
+.catch(
+  error => {
+
     console.error(
-      "Bot error:",
+      "❌ Failed to start Telegram bot:",
       error
-    )
+    );
+
+    process.exit(1);
+  }
 );
 
-bot.launch().then(
-  () =>
-    console.log(
-      "🤖 Bot started."
-    )
-);
+/* =========================
+   SHUTDOWN
+========================= */
 
 process.once(
   "SIGINT",
-  () =>
-    bot.stop("SIGINT")
+  () => {
+    bot.stop("SIGINT");
+  }
 );
 
 process.once(
   "SIGTERM",
-  () =>
-    bot.stop("SIGTERM")
+  () => {
+    bot.stop("SIGTERM");
+  }
 );
