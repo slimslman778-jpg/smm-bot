@@ -8,6 +8,7 @@ RUN apt-get update \
        python3-pip \
        curl \
        ca-certificates \
+       unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # تثبيت Deno
@@ -16,7 +17,7 @@ RUN curl -fsSL https://deno.land/install.sh | sh
 ENV DENO_INSTALL=/root/.deno
 ENV PATH=/root/.deno/bin:$PATH
 
-# تحديث yt-dlp مع مكونات EJS
+# تثبيت أحدث yt-dlp مع دعم EJS
 RUN python3 -m pip install \
     --break-system-packages \
     --no-cache-dir \
