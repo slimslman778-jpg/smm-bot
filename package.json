@@ -4,7 +4,9 @@
   "private": true,
   "description": "Telegram bot that downloads public video URLs and compresses them with FFmpeg.",
   "main": "src/server.js",
-  "scripts": { "start": "node src/server.js" },
+  "scripts": {
+    "start": "node src/server.js"
+  },
   "dependencies": {
     "express": "^4.21.2",
     "telegraf": "^4.16.3"
