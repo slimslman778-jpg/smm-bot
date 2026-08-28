@@ -1,8 +1,8 @@
 {
   "name": "telegram-video-compressor-link-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Telegram bot that downloads public video URLs and compresses them with FFmpeg.",
+  "description": "Telegram video downloader and compressor using yt-dlp and FFmpeg.",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js"
